@@ -1,0 +1,119 @@
+<script setup lang="ts">
+import { ref, onMounted, onUnmounted } from 'vue';
+import { neuralLink } from '../core/NeuralSocket';
+import { MessageType } from '../protocol/types';
+import { agentContext, setAgentStatus } from '../core/stateMachine';
+import { bus } from '../core/eventBus';
+
+const isRecording = ref(false);
+let mediaRecorder: MediaRecorder | null = null;
+let audioStream: MediaStream | null = null;
+
+// 🌟 核心修复 1：创建一个全局的 Promise 队列，强制保证异步切片按绝对顺序发送
+let sendQueue = Promise.resolve();
+
+const blobToBase64 = (blob: Blob): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const dataUrl = reader.result as string;
+      const base64 = dataUrl.split(',')[1] || ''; 
+      resolve(base64);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+};
+
+const initAudio = async () => {
+  try {
+    audioStream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: false, autoGainControl: false }
+    });
+    console.log('✅ [MicRecorder] 麦克风硬件权限获取成功');
+  } catch (err) {
+    console.error('❌ [MicRecorder] 无法访问麦克风:', err);
+  }
+};
+
+const startRecording = () => {
+  if (!audioStream) return;
+  if (agentContext.status === 'speaking') {
+    bus.emit(MessageType.CLIENT_INTERRUPT as any, { reason: 'barge_in' });
+  }
+
+  isRecording.value = true;
+  setAgentStatus('listening');
+
+  mediaRecorder = new MediaRecorder(audioStream, { mimeType: 'audio/webm' });
+
+  // 🌟 核心修复 2：将发送任务排入传送带，防止 Chunk 2 抢跑超过 Chunk 1
+  mediaRecorder.ondataavailable = (event) => {
+    if (event.data.size > 0) {
+      sendQueue = sendQueue.then(async () => {
+        const b64 = await blobToBase64(event.data);
+        neuralLink.send(MessageType.CLIENT_AUDIO_CHUNK, {
+          audio_b64: b64,
+          is_last: false 
+        });
+      });
+    }
+  };
+
+  // 🌟 核心修复 3：结束标志也必须在传送带末尾排队
+  mediaRecorder.onstop = () => {
+    sendQueue = sendQueue.then(() => {
+      neuralLink.send(MessageType.CLIENT_AUDIO_CHUNK, {
+        audio_b64: "",
+        is_last: true 
+      });
+    });
+  };
+
+  mediaRecorder.start();
+};
+
+const stopRecording = () => {
+  if (!mediaRecorder || mediaRecorder.state === 'inactive') return;
+  isRecording.value = false;
+  setAgentStatus('processing');
+  mediaRecorder.stop();
+};
+
+onMounted(async () => {
+  await initAudio();
+  bus.on('system:audio_queue_empty', () => {
+    if (agentContext.status === 'speaking') {
+      setAgentStatus('idle');
+    }
+  });
+});
+
+onUnmounted(() => {
+  if (audioStream) audioStream.getTracks().forEach(track => track.stop());
+});
+</script>
+
+<template>
+  <div class="mic-panel">
+    <div class="status-badge" :class="agentContext.status">
+      当前状态: {{ agentContext.status.toUpperCase() }}
+    </div>
+    <button class="record-btn" :class="{ recording: isRecording }"
+      @mousedown="startRecording" @mouseup="stopRecording" @mouseleave="stopRecording">
+      {{ isRecording ? '🎙️ 正在倾听 (松开发送)...' : '⏸️ 按住说话' }}
+    </button>
+  </div>
+</template>
+
+<style scoped>
+/* 样式保持不变 */
+.mic-panel { display: flex; flex-direction: column; align-items: center; gap: 15px; padding: 20px; background: #161b22; border: 1px solid #30363d; border-radius: 8px; }
+.status-badge { padding: 5px 15px; border-radius: 20px; font-weight: bold; font-size: 14px; }
+.idle { background: #484f58; color: white; }
+.listening { background: #238636; color: white; }
+.processing { background: #d29922; color: black; }
+.speaking { background: #8957e5; color: white; }
+.record-btn { padding: 15px 30px; font-size: 18px; border-radius: 8px; border: none; background-color: #21262d; color: #c9d1d9; cursor: pointer; transition: all 0.2s; user-select: none; }
+.record-btn:active, .record-btn.recording { background-color: #da3633; transform: scale(0.95); box-shadow: 0 0 15px rgba(218, 54, 51, 0.5); }
+</style>
