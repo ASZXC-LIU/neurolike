@@ -40,6 +40,12 @@ export const initMemoryMatrix = () => {
   // 2. 监听 AI 回复并收集
   let currentAiReply = "";
   bus.on(MessageType.SERVER_TTS_AUDIO, (payload) => {
+    // 🌟 过滤掉 sentence_id=0 的填充音 (如 "嗯...")，不计入长期记忆
+    if (payload.sentence_id === 0) {
+      console.log('🙊 [Memory] 忽略填充音，不写入历史');
+      return;
+    }
+
     if (payload.sync_text) {
       currentAiReply += payload.sync_text;
     }

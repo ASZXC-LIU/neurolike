@@ -4,7 +4,7 @@ import { bus } from '../core/eventBus';
 import { MessageType } from '../protocol/types';
 import type { ServerTtsAudio } from '../protocol/types';
 
-const audioQueue: string[] = [];
+const audioQueue: ServerTtsAudio[] = [];
 let isPlaying = false;
 let currentAudio: HTMLAudioElement | null = null; 
 
@@ -18,10 +18,14 @@ const playNext = async () => {
   }
   
   isPlaying = true;
-  const nextAudioB64 = audioQueue.shift();
+  const nextAudioPayload = audioQueue.shift();
   
+  if (nextAudioPayload?.sentence_id === 0) {
+    console.log('👄 [AudioReceiver] 正在播放填充音 (Latency Masking)...');
+  }
+
   try {
-    currentAudio = new Audio(`data:audio/wav;base64,${nextAudioB64 || ''}`);
+    currentAudio = new Audio(`data:audio/wav;base64,${nextAudioPayload?.audio_b64 || ''}`);
     
     // 强制等待当前这句语音播放完毕
     await new Promise((resolve) => {
@@ -57,8 +61,8 @@ const handleIncomingAudio = (payload: ServerTtsAudio) => {
     return;
   }
 
-  console.log(`[AudioReceiver] 入队: ${payload.sync_text} | 当前积压长度: ${audioQueue.length}`);
-  audioQueue.push(payload.audio_b64);
+  console.log(`[AudioReceiver] 入队: ${payload.sync_text} (ID: ${payload.sentence_id}) | 当前积压长度: ${audioQueue.length}`);
+  audioQueue.push(payload);
   
   // 只要有新包进队，就尝试踹一脚播放器
   playNext();

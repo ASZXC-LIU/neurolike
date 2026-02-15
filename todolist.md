@@ -6,16 +6,16 @@
 
   - 在 3060 节点部署 `vLLM` 或 `Ollama`，加载量化版的 `Qwen2.5-7B-Instruct` 或 `Llama-3-8B`。
   - 修改 `main.py` 的大模型调用逻辑，剔除 Gemini，全面转向本地 OpenAI 兼容 API 请求，实现**完全断网可用**。
-- **[ ] Task 1.2：大模型流式输出 (Streaming) 改造**
+- [x] Task 1.2：大模型流式输出 (Streaming) 改造
 
   - 将大模型请求设置为 `stream=True`。
   - 编写一个**流式 JSON 解析器**：因为大模型流式吐出的是不完整的 JSON 字符串，需要使用正则或缓冲池，实时提取 `thought` 和 `speak` 字段的碎片。
-- **[ ] Task 1.3：标点符号截断 (Semantic Chunking) 与并发 TTS**
+- [x] Task 1.3：标点符号截断 (Semantic Chunking) 与并发 TTS
 
   - 当提取出的 `speak` 文本流中遇到 `[。！？，,.]` 时，立刻触发截断。
   - 将截断的这句话**异步**发给 9880 端口进行 TTS 合成。
   - 合成完毕后立刻通过 WebSocket 推送给前端 `SERVER_TTS_AUDIO`，实现“边想、边合成、边播放”的无缝衔接，将延迟压进 1 秒内。
-- **[ ] Task 1.4：延迟掩盖 (Latency Masking - 拟人化处理)**
+- [ ] Task 1.4：延迟掩盖 (Latency Masking - 拟人化处理)**
 
   - 在 `main.py` 中增加计时器：如果 ASR 识别完毕后，大模型思考时间超过 600ms，自动向前端下发一段预生成的音频（如“嗯…”、“让我想想…”），消除用户的等待焦虑。
 - **[ ] Task 1.5：SSML 动态标记注入与副语言感知 (语调拟人)**
@@ -36,7 +36,7 @@
   - 在 Node.js (Electron) 层引入 `better-sqlite3`。
   - 编写 `HistoryManager` 类，拦截所有的 `CLIENT_TEXT_REQUEST` 和接收到的 `SERVER_TTS_AUDIO` 文本，双向存入本地数据库。
 
-- **[ ] Task 2.2：上下文滑动窗口**
+- [x] Task 2.2：上下文滑动窗口
 
   - 修改客户端请求协议，每次发语音请求时，附带最近 N 轮的 `chat_history` 发给 3060 大脑。
 

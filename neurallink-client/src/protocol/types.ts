@@ -111,6 +111,7 @@ export interface ServerEmotionShift {
   live2d_expression: string; // [微观补齐] 脸部表情 (如: blush, angry)
   live2d_motion: string;     // [微观补齐] 身体动作 (如: nod, shake_head)
   reason?: string;           
+  vad_sensitivity?: number;  // [Task 1.6 新增] 0.0 - 1.0 (1.0 最灵敏)
 }
 
 export interface ServerIntentCall {

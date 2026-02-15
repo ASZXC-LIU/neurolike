@@ -54,6 +54,7 @@ class MessageType(str, Enum):
     SERVER_ASR_RESULT = "server.asr_result"
     SERVER_THOUGHT_STREAM = "server.thought_stream"
     SERVER_TTS_AUDIO = "server.tts_audio"  # 🌟 修复点：与前端保持绝对一致
+    SERVER_EMOTION_SHIFT = "server.emotion_shift" # 🌟 Task 1.6 新增：情绪状态下发
     SERVER_ERROR = "server.error"
 
 
@@ -107,6 +108,8 @@ class NeuralLinkEngine:
             f"你是一个名为小智的 AI 助手。请不要在回复中使用 Emoji 表情，确保文本纯净以便语音合成。\n"
             f"格式如下：{{\"thought\": \"内心独白\", \"speak\": \"你要说的话\"}}。\n"
             f"注意：你的 thought 思考过程严格控制在 30 字以内，精简扼要！\n"
+            f"🌟 情感表达：你可以使用 [speed=1.2] (加快) 或 [speed=0.8] (减慢) 来控制语速，例如：'[speed=1.5]太棒了！'\n"
+            f"🌟 情绪状态：请在 thought 中明确你的情绪状态 (Mood)，例如：'Mood: Happy', 'Mood: Angry', 'Mood: Sad', 'Mood: Neutral'。\n"
             f"用户说：{user_text}"
         )
         try:
@@ -152,7 +155,7 @@ class NeuralLinkEngine:
                         logger.info("👄 下发填充音: 嗯……")
                         await self.send_message(msg_id, MessageType.SERVER_TTS_AUDIO, {
                             "audio_b64": NeuralLinkEngine._filler_audio_b64,
-                            "sync_text": "嗯...",  # 前端可以静默显示，或作为特效
+                            "sync_text": "嗯……",  # 前端可以静默显示，或作为特效
                             "sentence_id": 0,  # 0 代表这是一个辅助音
                             "is_reply_end": False
                         })
@@ -173,10 +176,27 @@ class NeuralLinkEngine:
 
                     s_id, text_chunk = item
                     logger.info(f"🎙️ 正在向 3060 节点请求语音合成 [{s_id}]: {text_chunk}")
+                    
+                    # 🌟 Task 1.5: SSML 标签解析器
+                    speed_factor = 1.0
+                    # 提取 [speed=1.2]
+                    speed_match = re.search(r'\[speed=([\d\.]+)\]', text_chunk)
+                    if speed_match:
+                        try:
+                            speed_factor = float(speed_match.group(1))
+                            # 剔除标签，只保留纯文本
+                            text_chunk = re.sub(r'\[speed=[\d\.]+\]', '', text_chunk)
+                            logger.info(f"🚀 动态语速调整: {speed_factor}x")
+                        except ValueError:
+                            pass
+
                     try:
                         async with httpx.AsyncClient() as client:
                             tts_url = "http://127.0.0.1:9880/tts"
-                            tts_res = await client.get(tts_url, params={"text": text_chunk}, timeout=15.0)
+                            tts_res = await client.get(tts_url, params={
+                                "text": text_chunk,
+                                "speed_factor": speed_factor
+                            }, timeout=15.0)
 
                         if self.current_task_id != task_id:
                             tts_queue.task_done()
@@ -231,6 +251,26 @@ class NeuralLinkEngine:
                                 "is_end": False
                             })
                             emitted_thought_len = len(current_thought)
+                            
+                            # 🌟 Task 1.6: 实时情绪感知与 VAD 阈值下发
+                            # 简单正则匹配 Mood: Xxx
+                            mood_match = re.search(r'Mood:\s*([A-Za-z]+)', new_thought, re.IGNORECASE)
+                            if mood_match:
+                                mood = mood_match.group(1).upper()
+                                vad_sensitivity = 0.5 # Default Neutral
+                                
+                                if mood in ["ANGRY", "FOCUS", "EXCITED", "HAPPY"]:
+                                    vad_sensitivity = 0.9 # 高唤醒 -> 高灵敏度 (-58dB)
+                                elif mood in ["SAD", "SLEEPY", "TIRED"]:
+                                    vad_sensitivity = 0.2 # 低唤醒 -> 低灵敏度 (-44dB)
+                                
+                                logger.info(f"🎭 感知到 AI 情绪: {mood} -> VAD Sensitivity: {vad_sensitivity}")
+                                await self.send_message(msg_id, MessageType.SERVER_EMOTION_SHIFT, {
+                                    "ai_mood_score": 0, # 暂留
+                                    "live2d_expression": mood.lower(),
+                                    "live2d_motion": "nod",
+                                    "vad_sensitivity": vad_sensitivity
+                                })
 
                     # --- 2. 处理 Speak 碎片流并【标点截断】 ---
                     if speak_match:
@@ -337,10 +377,21 @@ class NeuralLinkEngine:
                         return
 
                     clean_text = re.sub(r'<\|.*?\|>', '', res[0]['text']).strip()
-                    logger.info(f"👂 听到了: {clean_text}")
+                    
+                    # 🌟 Task 1.5: 提取 SenseVoiceSmall 的情感标签
+                    emotion_tags = re.findall(r'<\|(.*?)\|>', res[0]['text'])
+                    emotion_context = ""
+                    if emotion_tags:
+                        # 过滤掉非情感标签 (如 zh, itn 等)
+                        valid_emotions = [tag for tag in emotion_tags if tag in ["HAPPY", "SAD", "ANGRY", "NEUTRAL", "SIGH", "LAUGH"]]
+                        if valid_emotions:
+                            emotion_context = f" (用户状态: {', '.join(valid_emotions)})"
+                            logger.info(f"🎭 感知到副语言: {valid_emotions}")
+
+                    logger.info(f"👂 听到了: {clean_text}{emotion_context}")
 
                     await self.send_message(msg_id, MessageType.SERVER_ASR_RESULT, {
-                        "text": clean_text,
+                        "text": clean_text + emotion_context, # 将情感拼接到文本后，让前端也能看见
                         "is_valid_speech": len(clean_text) > 0
                     })
 

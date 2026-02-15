@@ -2,6 +2,10 @@ import os
 import sys
 import io
 import numpy as np
+
+# 🌟 强制设置标准输出编码为 UTF-8，防止 Windows 控制台打印 Emoji 报错
+sys.stdout.reconfigure(encoding='utf-8')
+
 import soundfile as sf
 import torch
 from fastapi import FastAPI, Query
@@ -117,8 +121,11 @@ app = FastAPI(lifespan=lifespan)
 # 5. API 路由层 (Facade 模式)
 # ==========================================
 @app.get("/tts")
-async def generate_tts(text: str = Query(..., description="要合成的文字")):
-    print(f"🔮 引擎接收合成任务: {text}")
+async def generate_tts(
+    text: str = Query(..., description="要合成的文字"),
+    speed_factor: float = Query(1.0, description="语速因子 (0.5-2.0)")
+):
+    print(f"🔮 引擎接收合成任务: {text} | 语速: {speed_factor}")
     try:
         req = {
             "text": text,
@@ -131,7 +138,7 @@ async def generate_tts(text: str = Query(..., description="要合成的文字"))
             "temperature": 1.0,
             "text_split_method": "cut5",
             "batch_size": 1,
-            "speed_factor": 1.0,
+            "speed_factor": speed_factor,
             "split_bucket": True,
             "return_fragment": False
         }

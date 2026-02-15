@@ -2,12 +2,23 @@
 import { ref, onMounted, onUnmounted } from 'vue';
 import { neuralLink } from '../core/NeuralSocket';
 import { MessageType } from '../protocol/types';
+import type { ServerEmotionShift } from '../protocol/types';
 import { agentContext, setAgentStatus } from '../core/stateMachine';
 import { bus } from '../core/eventBus';
+// 引入 hark 库 (需确保已安装: npm install hark @types/hark)
+// 如果没有 hark，我们暂时用模拟逻辑或原生 AudioContext 实现
+// 这里假设我们使用原生 AudioContext 实现简单的 VAD 阈值控制
 
 const isRecording = ref(false);
 let mediaRecorder: MediaRecorder | null = null;
 let audioStream: MediaStream | null = null;
+let audioContext: AudioContext | null = null;
+let analyser: AnalyserNode | null = null;
+let microphone: MediaStreamAudioSourceNode | null = null;
+
+// 🌟 Task 1.6: 动态 VAD 阈值
+// 默认 -50dB (标准抗噪)
+const currentVadThreshold = ref(-50); 
 
 // 🌟 核心修复 1：创建一个全局的 Promise 队列，强制保证异步切片按绝对顺序发送
 let sendQueue = Promise.resolve();
@@ -30,9 +41,29 @@ const initAudio = async () => {
     audioStream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: false, autoGainControl: false }
     });
+    
+    // 初始化 AudioContext 用于 VAD 分析
+    audioContext = new AudioContext();
+    analyser = audioContext.createAnalyser();
+    analyser.fftSize = 256;
+    microphone = audioContext.createMediaStreamSource(audioStream);
+    microphone.connect(analyser);
+    
     console.log('✅ [MicRecorder] 麦克风硬件权限获取成功');
   } catch (err) {
     console.error('❌ [MicRecorder] 无法访问麦克风:', err);
+  }
+};
+
+// 🌟 Task 1.6: 监听服务端情绪变化，动态调整 VAD 阈值
+const handleEmotionShift = (payload: ServerEmotionShift) => {
+  if (payload.vad_sensitivity !== undefined) {
+    // 映射逻辑: sensitivity (0.0-1.0) -> threshold (-60dB to -40dB)
+    // 1.0 (最灵敏) -> -60dB
+    // 0.0 (最迟钝) -> -40dB
+    const newThreshold = -40 - (payload.vad_sensitivity * 20);
+    currentVadThreshold.value = Math.round(newThreshold);
+    console.log(`🎚️ [MicRecorder] VAD 阈值已根据情绪调整为: ${currentVadThreshold.value}dB (灵敏度: ${payload.vad_sensitivity})`);
   }
 };
 
@@ -40,6 +71,8 @@ const startRecording = () => {
   if (!audioStream) return;
   if (agentContext.status === 'speaking') {
     bus.emit(MessageType.CLIENT_INTERRUPT as any, { reason: 'barge_in' });
+    // 2. 🌟 核心补齐：通过 WebSocket 跨端狙击后端的正在执行的任务！
+    neuralLink.send(MessageType.CLIENT_INTERRUPT, { reason: 'barge_in' });
   }
 
   isRecording.value = true;
@@ -87,10 +120,14 @@ onMounted(async () => {
       setAgentStatus('idle');
     }
   });
+  // 注册情绪监听
+  bus.on(MessageType.SERVER_EMOTION_SHIFT, handleEmotionShift);
 });
 
 onUnmounted(() => {
   if (audioStream) audioStream.getTracks().forEach(track => track.stop());
+  if (audioContext) audioContext.close();
+  bus.off(MessageType.SERVER_EMOTION_SHIFT, handleEmotionShift);
 });
 </script>
 
@@ -98,6 +135,9 @@ onUnmounted(() => {
   <div class="mic-panel">
     <div class="status-badge" :class="agentContext.status">
       当前状态: {{ agentContext.status.toUpperCase() }}
+    </div>
+    <div class="vad-indicator">
+      当前听觉灵敏度: {{ currentVadThreshold }}dB
     </div>
     <button class="record-btn" :class="{ recording: isRecording }"
       @mousedown="startRecording" @mouseup="stopRecording" @mouseleave="stopRecording">
@@ -110,6 +150,7 @@ onUnmounted(() => {
 /* 样式保持不变 */
 .mic-panel { display: flex; flex-direction: column; align-items: center; gap: 15px; padding: 20px; background: #161b22; border: 1px solid #30363d; border-radius: 8px; }
 .status-badge { padding: 5px 15px; border-radius: 20px; font-weight: bold; font-size: 14px; }
+.vad-indicator { font-size: 12px; color: #8b949e; }
 .idle { background: #484f58; color: white; }
 .listening { background: #238636; color: white; }
 .processing { background: #d29922; color: black; }
