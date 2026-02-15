@@ -121,18 +121,18 @@ class NeuralLinkEngine:
             sentence_buffer = ""
             sentence_id = 0
 
-            # 🌟 核心突破 2：TTS 异步传送带 (Queue)
+            #  核心突破 2：TTS 异步传送带 (Queue)
             tts_queue = asyncio.Queue()
-            # 🌟 Task 1.4 新增：是否已经下发了第一句正式语音的标志
-            first_audio_sent = False
+            #  Task 1.4 新增：是否已经下发了第一句正式语音的标志
+            task_state = {"first_audio_sent": False}
 
-            # 🌟 Task 1.4 新增：延迟掩盖看门狗协程
+            #  Task 1.4 新增：延迟掩盖看门狗协程
             async def latency_mask_worker():
                 # 倒计时 600ms (人类忍受沉默的阈值)
                 await asyncio.sleep(0.6)
 
                 # 如果 600ms 后，第一句正式回复还没生成，且用户没有打断
-                if not first_audio_sent and self.current_task_id == task_id:
+                if not task_state["first_audio_sent"] and self.current_task_id == task_id:
                     logger.info("⏳ 思考时间超过 600ms，触发延迟掩盖机制...")
 
                     # 如果内存里还没有缓存填充音，去 3060 节点静默生成一次
@@ -148,7 +148,7 @@ class NeuralLinkEngine:
                             return
 
                     # 再次校验状态，防止在请求 TTS 期间发生改变
-                    if not first_audio_sent and self.current_task_id == task_id and NeuralLinkEngine._filler_audio_b64:
+                    if not task_state["first_audio_sent"] and self.current_task_id == task_id and NeuralLinkEngine._filler_audio_b64:
                         logger.info("👄 下发填充音: 嗯……")
                         await self.send_message(msg_id, MessageType.SERVER_TTS_AUDIO, {
                             "audio_b64": NeuralLinkEngine._filler_audio_b64,
@@ -183,9 +183,9 @@ class NeuralLinkEngine:
                             break  # TTS 合成回来后，再次检查是否被打断
 
                         if tts_res.status_code == 200:
-                            # 🌟 Task 1.4 新增：真正的正文语音回来了，立刻关门打狗！
-                            if not first_audio_sent:
-                                first_audio_sent = True
+                            #  Task 1.4 新增：真正的正文语音回来了，立刻关门打狗！
+                            if not task_state["first_audio_sent"]:
+                                task_state["first_audio_sent"] = True
                                 mask_task.cancel()  # 取消看门狗倒计时（如果还没触发的话）
 
                             audio_b64 = base64.b64encode(tts_res.content).decode('utf-8')
@@ -203,7 +203,7 @@ class NeuralLinkEngine:
             # 启动 TTS 消费者并发协程
             tts_task = asyncio.create_task(tts_worker())
 
-            # 🌟 核心突破 3：生产者 (正则暴力撕开未闭合的 JSON)
+            #  核心突破 3：生产者 (正则暴力撕开未闭合的 JSON)
             async for chunk in response_stream:
                 if self.current_task_id != task_id:
                     logger.warning("🛑 任务已作废，掐断大脑思考流！")
@@ -324,14 +324,14 @@ class NeuralLinkEngine:
                 if len(full_audio) == 0:
                     return
 
-                # 🌟 生成新任务的 ID
+                # 生成新任务的 ID
                 self.current_task_id = str(uuid.uuid4())
                 task_id = self.current_task_id
 
                 try:
                     res = await asyncio.to_thread(process_and_recognize, full_audio)
 
-                    # 🌟 守卫 0：如果 ASR 推理期间用户按了打断，直接丢弃识别结果
+                    # 守卫 0：如果 ASR 推理期间用户按了打断，直接丢弃识别结果
                     if self.current_task_id != task_id:
                         logger.info("任务已作废，丢弃 ASR 结果")
                         return
@@ -344,18 +344,18 @@ class NeuralLinkEngine:
                         "is_valid_speech": len(clean_text) > 0
                     })
 
-                    # 5. 🌟 新增：处理前端发来的带记忆的对话请求
-                    if msg_type == MessageType.CLIENT_TEXT_REQUEST:
-                        self.current_task_id = str(uuid.uuid4())
-                        task_id = self.current_task_id
-
-                        user_text = payload.get("text", "")
-                        chat_history = payload.get("chat_history", [])
-
-                        await self.run_llm_inference(msg_id, user_text, chat_history, task_id)
 
                 except Exception as e:
                     logger.error(f"感知链路故障: {e}")
+ # 5. 处理前端发来的带记忆的对话请求
+        if msg_type == MessageType.CLIENT_TEXT_REQUEST:
+            self.current_task_id = str(uuid.uuid4())
+            task_id = self.current_task_id
+
+            user_text = payload.get("text", "")
+            chat_history = payload.get("chat_history", [])
+
+            await self.run_llm_inference(msg_id, user_text, chat_history, task_id)
 
 
 # ==========================================

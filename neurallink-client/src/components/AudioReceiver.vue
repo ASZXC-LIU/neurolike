@@ -8,43 +8,64 @@ const audioQueue: string[] = [];
 let isPlaying = false;
 let currentAudio: HTMLAudioElement | null = null; 
 
-// 唯一的 playNext 函数
+// 🌟 强壮的异步消费循环 (彻底修复死锁)
 const playNext = async () => {
+  if (isPlaying) return; // 防护：如果已经在播了，别抢麦
+  
   if (audioQueue.length === 0) {
     isPlaying = false;
-    bus.emit('system:audio_queue_empty', undefined);
-    return;
+    return; // 队列空了就休息，等待新包唤醒
   }
   
   isPlaying = true;
   const nextAudioB64 = audioQueue.shift();
-  // 添加 || '' 防止 base64 为 undefined 导致报错
-  currentAudio = new Audio(`data:audio/wav;base64,${nextAudioB64 || ''}`);
   
-  currentAudio.onended = () => {
+  try {
+    currentAudio = new Audio(`data:audio/wav;base64,${nextAudioB64 || ''}`);
+    
+    // 强制等待当前这句语音播放完毕
+    await new Promise((resolve) => {
+      if (!currentAudio) return resolve(true);
+      
+      currentAudio.onended = () => resolve(true);
+      currentAudio.onerror = () => resolve(true); // 出错也放行，绝不卡死队列
+      
+      currentAudio.play().catch(err => {
+        console.warn('浏览器静音拦截或播放失败:', err);
+        resolve(true);
+      });
+    });
+  } finally {
     currentAudio = null;
-    playNext();
-  };
-  
-  await currentAudio.play();
+    isPlaying = false;
+    // 当前语音播完，自动递归拉取队列里的下一句话
+    playNext(); 
+  }
 };
 
 const handleIncomingAudio = (payload: ServerTtsAudio) => {
-  // 🌟 收到结束包，直接退出，不放入音频缓冲池
+  // 🌟 收到结束包，挂起释放逻辑
   if (payload.is_reply_end) {
-    console.log('🏁 本轮对话文本已全部下发完毕');
+    console.log('🏁 本轮对话文本已全部下发完毕，等待队列排空...');
+    // 启动微型轮询：必须等所有积压的语音真正在物理层播完，才切回 idle 状态
+    const checkQueue = setInterval(() => {
+      if (!isPlaying && audioQueue.length === 0) {
+        clearInterval(checkQueue);
+        bus.emit('system:audio_queue_empty', undefined);
+      }
+    }, 100);
     return;
   }
-  console.log(`[AudioReceiver] 收到语音包，对应文本: ${payload.sync_text}`);
+
+  console.log(`[AudioReceiver] 入队: ${payload.sync_text} | 当前积压长度: ${audioQueue.length}`);
   audioQueue.push(payload.audio_b64);
   
-  if (!isPlaying) {
-    playNext();
-  }
+  // 只要有新包进队，就尝试踹一脚播放器
+  playNext();
 };
 
 const handleInterrupt = () => {
-  console.warn('🛑 [AudioReceiver] 收到紧急打断信号，清空播放队列！');
+  console.warn('🛑 [AudioReceiver] 收到紧急打断，强行清空队列！');
   audioQueue.length = 0; 
   if (currentAudio) {
     currentAudio.pause(); 
