@@ -26,6 +26,7 @@ export const MessageType = {
   CLIENT_SYSTEM_TICK: "client.system_tick",
   CLIENT_EMBED_REQUEST: "client.embed_request",
   CLIENT_ACTION_RESULT: "client.action_result",
+  CLIENT_REQUEST_MASTER: "client.request_master", // 🌟 Task 4.8 新增
 
   SERVER_ASR_RESULT: "server.asr_result",
   SERVER_THOUGHT_STREAM: "server.thought_stream",
@@ -33,6 +34,7 @@ export const MessageType = {
   SERVER_INTENT_CALL: "server.intent_call",
   SERVER_TTS_AUDIO: "server.tts_audio",
   SERVER_EMBED_RESULT: "server.embed_result",
+  SERVER_MASTER_GRANT: "server.master_grant", // 🌟 Task 4.8 新增
   SERVER_ERROR: "server.error"
 } as const;
 
@@ -90,6 +92,11 @@ export interface ClientActionResult {
   detail: string;            
 }
 
+export interface ClientRequestMaster {
+  client_id: string;
+  reason: string;
+}
+
 // ------------------------------------------
 // 3. 下行数据包定义 (Server -> Client)
 // ------------------------------------------
@@ -127,11 +134,17 @@ export interface ServerTtsAudio {
   sentence_id: number;       
   sync_text: string;         // 解决音画撕裂的强绑定字幕
   is_reply_end: boolean;     // [微观补齐] 标志这轮对话的音频是否已全部下发完毕，用于释放状态机
+  is_filler_audio?: boolean; // [Task 1.4] 延迟掩盖音频标记，兼容旧版 sentence_id=0 约定
 }
 
 export interface ServerEmbedResult {
   memory_id: string;         // [微观补齐] 原路返回，供 Client 对号入座
   vector: number[];          
+}
+
+export interface ServerMasterGrant {
+  master_client_id: string;
+  timestamp: number;
 }
 
 export interface ServerError {

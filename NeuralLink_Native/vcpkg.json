@@ -1,0 +1,11 @@
+{
+  "name": "neurallink-native",
+  "version": "1.0.0",
+  "dependencies": [
+    "glew",
+    "glfw3",
+    "nlohmann-json",
+    "openssl",
+    "boost-beast"
+  ]
+}

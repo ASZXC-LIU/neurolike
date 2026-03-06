@@ -81,10 +81,16 @@
 *当前痛点：依然是“一问一答”的对讲机模式，AI 无法自己主动发起话题，也无法操控你的电脑。*
 
 - **[ ] Task 4.1：系统节拍器 (System Tick) 与自主广播**
-  - 在客户端实现定时任务（Cron），每隔一段时间向总线广播当前系统时间、聚焦窗口名称、用户空闲时长。
-  - 当触发特定规则（如：深夜还在敲代码），主动构造请求发给 3060，让 AI 突然发声：“很晚了，注意休息哦。”
+  - 在客户端实现定时任务（Cron），每隔一段时间（如 1 分钟）向总线广播 `CLIENT_SYSTEM_TICK`。
+  - Payload 包含：`current_time`, `active_window_title`, `user_idle_seconds`, `battery_level`。
+  - 服务端逻辑：收到 Tick 后，LLM 进行快速推理（System Prompt 需包含“仅在必要时说话”的约束）。如果决定说话，生成 `speak` 内容；否则返回空。
 
-- **[ ] Task 4.2：意图路由 (Intent Router) 与函数调用 (Function Calling)**
+- **[ ] Task 4.2：视觉与环境感知 (Context Sensing)**
+  - **屏幕感知**：集成 `active-win` 或类似库，实时获取当前前台应用的名称和标题。
+  - **剪贴板监听**：监听剪贴板文本变化，当复制了特定格式（如代码段）时，主动询问“需要解释这段代码吗？”（需设置开关，防止烦人）。
+  - **无感交互**：实现 Live2D 的“眼神跟随”功能（根据鼠标位置移动眼球），以及“闲置动作”（用户不理它时，自动播放打哈欠、趴桌子动画）。
+
+- **[ ] Task 4.3：意图路由 (Intent Router) 与函数调用 (Function Calling)**
 
   - 大模型返回时，如果判断是系统级指令（如“打开网易云”），不走 TTS 闲聊管线，而是发送 `SERVER_INTENT_CALL`。
 
@@ -114,7 +120,51 @@
     2. **IM 挂载**：通过图像识别或无障碍接口读取消息并回复。
     3. **RCON 协议封装**：实现 Minecraft 等游戏的底层指令注入。
 
-### **第五阶段：系统基建、防御与自我进化**
+- **[ ] Task 4.8：多端协同与静音互斥 (Multi-Client Mutex)**
+  - **服务端**：维护 `current_master_client_id`。当收到 `CLIENT_WAKE_UP` 或 `CLIENT_AUDIO_CHUNK` 时，校验是否为 Master。
+  - **客户端**：实现 `Active/Passive` 状态切换。Passive 模式下，收到 `SERVER_TTS_AUDIO` 仅更新字幕和表情，不调用 `AudioContext.play()`。
+  - **抢占机制**：Vue 端增加“获取控制权”按钮，点击后发送 `CLIENT_REQUEST_MASTER`，强制剥夺 C++ 端的发声权。
+
+- **[ ] Task 4.9：Vue Client 形态重构 (Console Mode)**
+  - **UI 分离**：将 Live2D 渲染区域独立为一个组件，增加“隐藏/显示”开关。
+  - **默认行为**：Vue Client 启动时默认进入“控制台模式”（隐藏 Live2D，仅显示日志和设置），除非用户手动开启 Live2D 调试。
+  - **多端共存**：确保 Vue Client (控制台) 和 C++ Client (桌宠) 可以同时连接 WebSocket，互不干扰（基于 Task 4.8 的互斥机制）。
+
+### 🖥️ 第六阶段：C++ Native Client (沉浸式桌宠)
+
+*目标：构建极致性能、完美透明、系统级集成的最终形态桌宠。*
+
+- **[x] Task 6.1：开发环境搭建**
+  - 安装 Visual Studio 2022 (C++ Desktop Workload)。
+  - 配置 `vcpkg` 包管理器 (Manifest Mode)。
+  - 集成 `Boost.Beast` (WebSocket), `nlohmann-json`, `OpenSSL`, `GLEW`, `GLFW`。
+  - 验证 Live2D Cubism SDK for Native 路径配置。
+  - 成功编译并运行 Hello World (JSON + Boost.Beast 环境检查)。
+
+- **[ ] Task 6.2：透明窗口与渲染管线**
+  - 基于 Win32 API 创建无边框窗口 (`WS_EX_LAYERED`)。
+  - 集成 DWM API (`DwmExtendFrameIntoClientArea`) 实现 Alpha 通道透传。
+  - 初始化 OpenGL 上下文，确保 `glClearColor(0,0,0,0)` 正确清除背景。
+
+- **[ ] Task 6.3：交互穿透 (Hit Testing)**
+  - 拦截 `WM_NCHITTEST` 消息。
+  - 调用 Cubism SDK 的 `IsHit()` 方法判断鼠标是否点击在模型网格上。
+  - 实现：点在模型上 -> `HTCLIENT`，点在空白处 -> `HTTRANSPARENT`。
+
+- **[ ] Task 6.4：网络与音频集成**
+  - 集成 `websocketpp` 或 `ixwebsocket`，实现与 Python Server 的全双工通信。
+  - 集成 `miniaudio` 或 `PortAudio`，实现麦克风录制与 PCM 音频流播放。
+  - 对齐 Vue 端的协议：发送 `CLIENT_AUDIO_CHUNK`，接收 `SERVER_TTS_AUDIO`。
+
+- **[ ] Task 6.5：Live2D 动作驱动**
+  - 解析 `SERVER_EMOTION_SHIFT`，切换模型表情 (`Expression`)。
+  - 解析音频振幅 (`Volume DB`)，实时驱动 `ParamMouthOpenY` 实现口型同步。
+
+- **[ ] Task 6.6：离线行为树 (Offline Behavior Tree)**
+  - **机制**：当 WebSocket 断连时，启动本地简易行为树。
+  - **功能**：响应鼠标点击（播放本地预设 WAV，如“大脑连接断开啦...”），随机播放呼吸/眨眼动画，避免模型僵死。
+
+### **第七阶段：系统基建、防御与自我进化**
 
 - **[ ] Task 5.1：mDNS 局域网零配置发现 (无感组网)**
 

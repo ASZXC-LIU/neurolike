@@ -3,7 +3,7 @@
  * ==========================================
  * NeuralLink Private Agent - WebSocket 核心协议
  * 版本: V1.3 (Ultimate Edition)
- * 架构: 双机全双工 (主力机 Node.js <-> 3060 FastAPI)
+ * 架构: 双机全双工 (Client [Vue/C++] <-> 3060 FastAPI)
  * ==========================================
  */
 
@@ -12,6 +12,7 @@
 // ------------------------------------------
 export interface WsMessage<T = any> {
   msg_id: string;          // 消息UUID
+  client_type?: "vue" | "cpp"; // [新增] 客户端类型标识
   type: MessageType;       // 路由类型
   timestamp: number;       // 毫秒级时间戳
   payload: T;              // 业务包
@@ -27,6 +28,7 @@ export enum MessageType {
   CLIENT_SYSTEM_TICK = "client.system_tick",       // 环境心跳节拍
   CLIENT_EMBED_REQUEST = "client.embed_request",   // 请求向量化计算
   CLIENT_ACTION_RESULT = "client.action_result",   // 插件执行反馈
+  CLIENT_REQUEST_MASTER = "client.request_master", // [新增] 申请成为主控端
 
   // --- 下行：Server -> Client ---
   SERVER_ASR_RESULT = "server.asr_result",         // ASR 识别结果与拦截

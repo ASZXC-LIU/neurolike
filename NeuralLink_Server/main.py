@@ -3,8 +3,10 @@ import logging
 import base64
 import re
 import time
+import os
+from contextlib import suppress
 from enum import Enum
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import httpx
 import io
 import uuid
@@ -42,6 +44,33 @@ def process_and_recognize(audio_bytes: bytes) -> list:
 genai.configure(api_key="AIzaSyA8n3UNUSg-4Ln9WWY_jtvUxmxRH4FMwjQ")
 
 
+def _read_int_env(key: str, default: int) -> int:
+    value = os.getenv(key)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        logger.warning("环境变量 %s=%s 非法，回退默认值 %s", key, value, default)
+        return default
+
+
+def _read_float_env(key: str, default: float) -> float:
+    value = os.getenv(key)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        logger.warning("环境变量 %s=%s 非法，回退默认值 %s", key, value, default)
+        return default
+
+
+LATENCY_MASK_THRESHOLD_MS = _read_int_env("LATENCY_MASK_THRESHOLD_MS", 600)
+LATENCY_MASK_FILLER_TEXT = os.getenv("LATENCY_MASK_FILLER_TEXT", "嗯……")
+LATENCY_MASK_TTS_TIMEOUT_SEC = _read_float_env("LATENCY_MASK_TTS_TIMEOUT_SEC", 3.0)
+
+
 # ==========================================
 # 1. 协议枚举 (修复了与前端不匹配的枚举)
 # ==========================================
@@ -51,15 +80,19 @@ class MessageType(str, Enum):
     CLIENT_AUDIO_CHUNK = "client.audio_chunk"
     CLIENT_TEXT_REQUEST = "client.text_request"  # 🌟 新增：携带记忆的文本请求
     CLIENT_INTERRUPT = "client.interrupt"  # 🌟 新增：确保打断指令在枚举中
+    CLIENT_REQUEST_MASTER = "client.request_master" # 🌟 Task 4.8 新增：申请主控权
+
     SERVER_ASR_RESULT = "server.asr_result"
     SERVER_THOUGHT_STREAM = "server.thought_stream"
     SERVER_TTS_AUDIO = "server.tts_audio"  # 🌟 修复点：与前端保持绝对一致
     SERVER_EMOTION_SHIFT = "server.emotion_shift" # 🌟 Task 1.6 新增：情绪状态下发
+    SERVER_MASTER_GRANT = "server.master_grant" # 🌟 Task 4.8 新增：广播主控权变更
     SERVER_ERROR = "server.error"
 
 
 class WsMessage(BaseModel):
     msg_id: str
+    client_type: Optional[str] = None # 🌟 Task 4.8 新增：客户端类型
     type: MessageType
     timestamp: int
     payload: Dict[str, Any]
@@ -76,13 +109,43 @@ class ClientAudioChunk(BaseModel):
 class NeuralLinkEngine:
     # 🌟 新增：类级别的全局缓存，存放填充音的 Base64，全局复用
     _filler_audio_b64: str = None
+    # 🌟 Task 4.8 新增：全局 Master ID
+    _current_master_id: str = None
+    # 🌟 Task 4.8 新增：全局连接池，用于广播
+    _connected_clients: list = []
+
+    @classmethod
+    async def warmup_filler_audio(cls) -> bool:
+        if cls._filler_audio_b64:
+            return True
+
+        try:
+            async with httpx.AsyncClient() as client:
+                res = await client.get(
+                    "http://127.0.0.1:9880/tts",
+                    params={"text": LATENCY_MASK_FILLER_TEXT},
+                    timeout=LATENCY_MASK_TTS_TIMEOUT_SEC,
+                )
+            if res.status_code == 200:
+                cls._filler_audio_b64 = base64.b64encode(res.content).decode("utf-8")
+                logger.info("✅ 延迟掩盖填充音预热完成: %s", LATENCY_MASK_FILLER_TEXT)
+                return True
+            logger.warning("填充音预热失败: HTTP %s", res.status_code)
+        except Exception as e:
+            logger.warning("填充音预热失败（服务继续运行）: %s", e)
+        return False
 
     def __init__(self, websocket: WebSocket):
         self.ws = websocket
         self.is_authenticated = False
         self.audio_buffer = []  # 音频拼接缓存区
+        self.client_id = str(uuid.uuid4()) # 为每个连接分配唯一 ID
 
         self.current_task_id = None
+        
+        # 注册到连接池
+        NeuralLinkEngine._connected_clients.append(self)
+
     async def send_message(self, msg_id: str, msg_type: MessageType, payload: dict):
         msg = {
             "msg_id": msg_id,
@@ -90,7 +153,17 @@ class NeuralLinkEngine:
             "timestamp": int(time.time() * 1000),
             "payload": payload
         }
-        await self.ws.send_text(json.dumps(msg))
+        try:
+            await self.ws.send_text(json.dumps(msg))
+        except Exception as e:
+            logger.warning(f"发送消息失败: {e}")
+
+    # 🌟 Task 4.8 新增：广播消息给所有客户端
+    @classmethod
+    async def broadcast_message(cls, msg_id: str, msg_type: MessageType, payload: dict):
+        for client in cls._connected_clients:
+            if client.ws.client_state.name == "CONNECTED":
+                await client.send_message(msg_id, msg_type, payload)
 
     async def run_llm_inference(self, msg_id: str, user_text: str, chat_history: list, task_id: str):
         logger.info(f"✨ 正在通过 Gemini 思考: {user_text}")
@@ -127,37 +200,44 @@ class NeuralLinkEngine:
             #  核心突破 2：TTS 异步传送带 (Queue)
             tts_queue = asyncio.Queue()
             #  Task 1.4 新增：是否已经下发了第一句正式语音的标志
-            task_state = {"first_audio_sent": False}
+            task_state = {"first_audio_sent": False, "latency_mask_sent": False}
 
             #  Task 1.4 新增：延迟掩盖看门狗协程
             async def latency_mask_worker():
-                # 倒计时 600ms (人类忍受沉默的阈值)
-                await asyncio.sleep(0.6)
+                # 倒计时阈值 (默认 600ms，可配置)
+                await asyncio.sleep(max(LATENCY_MASK_THRESHOLD_MS, 0) / 1000.0)
 
-                # 如果 600ms 后，第一句正式回复还没生成，且用户没有打断
-                if not task_state["first_audio_sent"] and self.current_task_id == task_id:
-                    logger.info("⏳ 思考时间超过 600ms，触发延迟掩盖机制...")
+                # 如果超时后，第一句正式回复还没生成，且用户没有打断
+                if (
+                    not task_state["first_audio_sent"]
+                    and not task_state["latency_mask_sent"]
+                    and self.current_task_id == task_id
+                ):
+                    logger.info("⏳ 思考时间超过 %sms，触发延迟掩盖机制...", LATENCY_MASK_THRESHOLD_MS)
 
-                    # 如果内存里还没有缓存填充音，去 3060 节点静默生成一次
+                    # 优先命中启动期缓存；缺失时再按需拉取一次
                     if not NeuralLinkEngine._filler_audio_b64:
-                        try:
-                            async with httpx.AsyncClient() as client:
-                                res = await client.get("http://127.0.0.1:9880/tts", params={"text": "嗯……"},
-                                                       timeout=3.0)
-                                if res.status_code == 200:
-                                    NeuralLinkEngine._filler_audio_b64 = base64.b64encode(res.content).decode('utf-8')
-                        except Exception as e:
-                            logger.warning(f"填充音获取失败，跳过掩盖: {e}")
+                        ready = await NeuralLinkEngine.warmup_filler_audio()
+                        if not ready:
+                            logger.warning("填充音获取失败，跳过掩盖")
                             return
 
                     # 再次校验状态，防止在请求 TTS 期间发生改变
-                    if not task_state["first_audio_sent"] and self.current_task_id == task_id and NeuralLinkEngine._filler_audio_b64:
-                        logger.info("👄 下发填充音: 嗯……")
-                        await self.send_message(msg_id, MessageType.SERVER_TTS_AUDIO, {
+                    if (
+                        not task_state["first_audio_sent"]
+                        and not task_state["latency_mask_sent"]
+                        and self.current_task_id == task_id
+                        and NeuralLinkEngine._filler_audio_b64
+                    ):
+                        task_state["latency_mask_sent"] = True
+                        logger.info("👄 下发填充音: %s", LATENCY_MASK_FILLER_TEXT)
+                        # 🌟 Task 4.8: 广播 TTS 音频，让所有客户端都能收到（但只有 Master 播放）
+                        await NeuralLinkEngine.broadcast_message(msg_id, MessageType.SERVER_TTS_AUDIO, {
                             "audio_b64": NeuralLinkEngine._filler_audio_b64,
-                            "sync_text": "嗯……",  # 前端可以静默显示，或作为特效
+                            "sync_text": LATENCY_MASK_FILLER_TEXT,  # 前端可以静默显示，或作为特效
                             "sentence_id": 0,  # 0 代表这是一个辅助音
-                            "is_reply_end": False
+                            "is_reply_end": False,
+                            "is_filler_audio": True
                         })
 
             # 启动看门狗任务
@@ -209,11 +289,13 @@ class NeuralLinkEngine:
                                 mask_task.cancel()  # 取消看门狗倒计时（如果还没触发的话）
 
                             audio_b64 = base64.b64encode(tts_res.content).decode('utf-8')
-                            await self.send_message(msg_id, MessageType.SERVER_TTS_AUDIO, {
+                            # 🌟 Task 4.8: 广播 TTS 音频
+                            await NeuralLinkEngine.broadcast_message(msg_id, MessageType.SERVER_TTS_AUDIO, {
                                 "audio_b64": audio_b64,
                                 "sync_text": text_chunk,
                                 "sentence_id": s_id,
-                                "is_reply_end": False
+                                "is_reply_end": False,
+                                "is_filler_audio": False
                             })
                     except Exception as e:
                         logger.error(f"❌ TTS 服务故障: {e}")
@@ -246,7 +328,8 @@ class NeuralLinkEngine:
                         current_thought = thought_match.group(1).replace('\\n', '\n')
                         new_thought = current_thought[emitted_thought_len:]
                         if new_thought:
-                            await self.send_message(msg_id, MessageType.SERVER_THOUGHT_STREAM, {
+                            # 🌟 Task 4.8: 广播 Thought
+                            await NeuralLinkEngine.broadcast_message(msg_id, MessageType.SERVER_THOUGHT_STREAM, {
                                 "chunk": new_thought,
                                 "is_end": False
                             })
@@ -265,7 +348,8 @@ class NeuralLinkEngine:
                                     vad_sensitivity = 0.2 # 低唤醒 -> 低灵敏度 (-44dB)
                                 
                                 logger.info(f"🎭 感知到 AI 情绪: {mood} -> VAD Sensitivity: {vad_sensitivity}")
-                                await self.send_message(msg_id, MessageType.SERVER_EMOTION_SHIFT, {
+                                # 🌟 Task 4.8: 广播情绪
+                                await NeuralLinkEngine.broadcast_message(msg_id, MessageType.SERVER_EMOTION_SHIFT, {
                                     "ai_mood_score": 0, # 暂留
                                     "live2d_expression": mood.lower(),
                                     "live2d_motion": "nod",
@@ -295,7 +379,7 @@ class NeuralLinkEngine:
             # --- 流式接收完毕，大收尾 ---
             if self.current_task_id == task_id:
                 # 1. 广播 thought 结束信号
-                await self.send_message(msg_id, MessageType.SERVER_THOUGHT_STREAM, {
+                await NeuralLinkEngine.broadcast_message(msg_id, MessageType.SERVER_THOUGHT_STREAM, {
                     "chunk": "",
                     "is_end": True
                 })
@@ -310,14 +394,19 @@ class NeuralLinkEngine:
 
                 # 4. 挂起等待所有 TTS 任务合成完毕
                 await tts_task
+                if not mask_task.done():
+                    mask_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await mask_task
 
                 # 5. 【微观补齐】发送对话结束的空包，释放前端状态机
                 if self.current_task_id == task_id:
-                    await self.send_message(msg_id, MessageType.SERVER_TTS_AUDIO, {
+                    await NeuralLinkEngine.broadcast_message(msg_id, MessageType.SERVER_TTS_AUDIO, {
                         "audio_b64": "",
                         "sync_text": "",
                         "sentence_id": -1,
-                        "is_reply_end": True
+                        "is_reply_end": True,
+                        "is_filler_audio": False
                     })
                     logger.info("✅ 这一轮对话彻底结束，状态重置！")
 
@@ -339,7 +428,6 @@ class NeuralLinkEngine:
         if msg_type == MessageType.CLIENT_INTERRUPT:
             logger.warning(f"🛑 收到紧急打断信号: {payload.get('reason')}")
             # 刷新任务 ID，让所有正在进行的推理和 TTS 变成“废弃任务”
-
             self.current_task_id = str(uuid.uuid4())
             return
 
@@ -350,8 +438,23 @@ class NeuralLinkEngine:
                 logger.info("✅ 鉴权成功")
             return
 
-        # 4. 处理音频流
+        # 🌟 Task 4.8: 处理主控权抢占
+        if msg_type == MessageType.CLIENT_REQUEST_MASTER:
+            NeuralLinkEngine._current_master_id = self.client_id
+            logger.info(f"👑 客户端 {self.client_id} 抢占了主控权")
+            await NeuralLinkEngine.broadcast_message(msg_id, MessageType.SERVER_MASTER_GRANT, {
+                "master_client_id": self.client_id,
+                "timestamp": int(time.time() * 1000)
+            })
+            return
+
+        # 4. 处理音频流 (🌟 Task 4.8: 增加互斥校验)
         if msg_type == MessageType.CLIENT_AUDIO_CHUNK:
+            # 如果当前没有 Master，或者发送者不是 Master，丢弃音频
+            if NeuralLinkEngine._current_master_id and self.client_id != NeuralLinkEngine._current_master_id:
+                # logger.debug("🔇 忽略非 Master 节点的音频流")
+                return
+
             chunk = ClientAudioChunk(**payload)
             if chunk.audio_b64:
                 self.audio_buffer.append(base64.b64decode(chunk.audio_b64))
@@ -390,7 +493,8 @@ class NeuralLinkEngine:
 
                     logger.info(f"👂 听到了: {clean_text}{emotion_context}")
 
-                    await self.send_message(msg_id, MessageType.SERVER_ASR_RESULT, {
+                    # 🌟 Task 4.8: 广播 ASR 结果
+                    await NeuralLinkEngine.broadcast_message(msg_id, MessageType.SERVER_ASR_RESULT, {
                         "text": clean_text + emotion_context, # 将情感拼接到文本后，让前端也能看见
                         "is_valid_speech": len(clean_text) > 0
                     })
@@ -415,6 +519,17 @@ class NeuralLinkEngine:
 app = FastAPI()
 
 
+@app.on_event("startup")
+async def warmup_latency_mask_audio():
+    logger.info(
+        "⚙️ 延迟掩盖配置: threshold=%sms filler_text=%s timeout=%ss",
+        LATENCY_MASK_THRESHOLD_MS,
+        LATENCY_MASK_FILLER_TEXT,
+        LATENCY_MASK_TTS_TIMEOUT_SEC,
+    )
+    await NeuralLinkEngine.warmup_filler_audio()
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
@@ -424,3 +539,6 @@ async def websocket_endpoint(websocket: WebSocket):
             await engine.handle_message(await websocket.receive_text())
     except WebSocketDisconnect:
         logger.info("🔌 客户端已断开连接")
+        # 🌟 Task 4.8: 移除连接
+        if engine in NeuralLinkEngine._connected_clients:
+            NeuralLinkEngine._connected_clients.remove(engine)

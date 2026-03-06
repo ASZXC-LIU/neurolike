@@ -6,9 +6,13 @@ export class NeuralSocket {
   private ws: WebSocket | null = null;
   private url: string;
   private reconnectTimer: number | null = null;
+  // 🌟 Task 4.8: 存储 Client ID
+  public clientId: string = "";
 
   constructor(url: string = 'ws://127.0.0.1:8000/ws') {
     this.url = url;
+    // 🌟 Task 4.8: 生成 Client ID
+    this.clientId = crypto.randomUUID();
   }
 
   public connect() {

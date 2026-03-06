@@ -11,6 +11,8 @@ import MicRecorder from './components/MicRecorder.vue';
 
 // 🌟 新增：系统就绪状态标志
 const systemReady = ref(false);
+// 🌟 Task 4.8: 主控权状态
+const isMaster = ref(false);
 
 const bootSystem = () => {
   systemReady.value = true;
@@ -26,12 +28,33 @@ const bootSystem = () => {
   neuralLink.connect();
 };
 
+// 🌟 Task 4.8: 抢占主控权
+const requestMaster = () => {
+  if (!neuralLink.clientId) return;
+  neuralLink.send(MessageType.CLIENT_REQUEST_MASTER, {
+    client_id: neuralLink.clientId,
+    reason: "manual_override"
+  });
+};
+
 onMounted(() => {
   // ❌ 删除了原本这里的 neuralLink.connect();
 
   // 监听后端发来音频，意味着 AI 开始说话了
   bus.on(MessageType.SERVER_TTS_AUDIO, () => {
     setAgentStatus('speaking');
+  });
+
+  // 🌟 Task 4.8: 监听主控权变更
+  bus.on(MessageType.SERVER_MASTER_GRANT, (payload: any) => {
+    // 如果 Server 广播的 master_client_id 等于我的 ID，那我就是 Master
+    if (payload.master_client_id === neuralLink.clientId) {
+      isMaster.value = true;
+      console.log("👑 我已成为 Master 节点");
+    } else {
+      isMaster.value = false;
+      console.log(`🛡️ Master 权已移交至: ${payload.master_client_id}`);
+    }
   });
 });
 </script>
@@ -49,16 +72,31 @@ onMounted(() => {
     <template v-else>
       <header>
         <h1>🧠 NeuralLink Control Center</h1>
+        <!-- 🌟 Task 4.8: 抢占按钮 -->
+        <div class="master-control">
+           <button 
+            @click="requestMaster" 
+            :class="['master-btn', { active: isMaster }]"
+          >
+            {{ isMaster ? '👑 主控模式 (Master)' : '🛡️ 抢占控制权 (Slave)' }}
+          </button>
+        </div>
       </header>
       
       <main class="grid-container">
         <div class="left-panel">
-          <MicRecorder />
+          <!-- 🌟 Task 4.8: 只有 Master 才能录音 -->
+          <MicRecorder v-if="isMaster" />
+          <div v-else class="slave-mode-tip">
+            <p>当前为从机模式，仅接收消息。</p>
+            <p>请点击右上角抢占控制权以启用麦克风。</p>
+          </div>
         </div>
         <div class="right-panel">
           <MonologueDebugger />
         </div>
-        <AudioReceiver />
+        <!-- 🌟 Task 4.8: AudioReceiver 内部需要判断 isMaster -->
+        <AudioReceiver :is-master="isMaster" />
       </main>
     </template>
   </div>
@@ -73,7 +111,14 @@ onMounted(() => {
   font-family: 'Fira Code', monospace;
 }
 
-header { border-bottom: 1px solid #30363d; padding-bottom: 10px; margin-bottom: 20px; }
+header { 
+  border-bottom: 1px solid #30363d; 
+  padding-bottom: 10px; 
+  margin-bottom: 20px; 
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
 
 .grid-container {
   display: grid;
@@ -123,5 +168,38 @@ header { border-bottom: 1px solid #30363d; padding-bottom: 10px; margin-bottom: 
   color: #0d1117;
   box-shadow: 0 0 25px rgba(88, 166, 255, 0.6);
   transform: translateY(-2px);
+}
+
+/* 🌟 Task 4.8: Master 按钮样式 */
+.master-btn {
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-family: 'Fira Code', monospace;
+  cursor: pointer;
+  transition: all 0.2s;
+  border: 1px solid #30363d;
+  background-color: #21262d;
+  color: #8b949e;
+}
+
+.master-btn.active {
+  background-color: #238636;
+  color: #ffffff;
+  border-color: #238636;
+  box-shadow: 0 0 10px rgba(35, 134, 54, 0.4);
+}
+
+.master-btn:hover:not(.active) {
+  background-color: #30363d;
+  color: #c9d1d9;
+}
+
+.slave-mode-tip {
+  padding: 20px;
+  border: 1px dashed #30363d;
+  border-radius: 8px;
+  color: #8b949e;
+  text-align: center;
+  margin-top: 20px;
 }
 </style>

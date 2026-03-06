@@ -4,9 +4,16 @@ import { bus } from '../core/eventBus';
 import { MessageType } from '../protocol/types';
 import type { ServerTtsAudio } from '../protocol/types';
 
+// 🌟 Task 4.8: 接收 isMaster 属性
+const props = defineProps<{
+  isMaster: boolean
+}>();
+
 const audioQueue: ServerTtsAudio[] = [];
 let isPlaying = false;
 let currentAudio: HTMLAudioElement | null = null; 
+
+const isFillerAudio = (payload: ServerTtsAudio) => payload.is_filler_audio ?? payload.sentence_id === 0;
 
 // 🌟 强壮的异步消费循环 (彻底修复死锁)
 const playNext = async () => {
@@ -20,25 +27,35 @@ const playNext = async () => {
   isPlaying = true;
   const nextAudioPayload = audioQueue.shift();
   
-  if (nextAudioPayload?.sentence_id === 0) {
-    console.log('👄 [AudioReceiver] 正在播放填充音 (Latency Masking)...');
+  if (nextAudioPayload && isFillerAudio(nextAudioPayload)) {
+    console.log(' [AudioReceiver] 正在播放填充音 (Latency Masking)...');
   }
 
   try {
-    currentAudio = new Audio(`data:audio/wav;base64,${nextAudioPayload?.audio_b64 || ''}`);
-    
-    // 强制等待当前这句语音播放完毕
-    await new Promise((resolve) => {
-      if (!currentAudio) return resolve(true);
+    // 🌟 Task 4.8: 只有 Master 才能播放声音
+    if (props.isMaster) {
+      currentAudio = new Audio(`data:audio/wav;base64,${nextAudioPayload?.audio_b64 || ''}`);
       
-      currentAudio.onended = () => resolve(true);
-      currentAudio.onerror = () => resolve(true); // 出错也放行，绝不卡死队列
-      
-      currentAudio.play().catch(err => {
-        console.warn('浏览器静音拦截或播放失败:', err);
-        resolve(true);
+      // 强制等待当前这句语音播放完毕
+      await new Promise((resolve) => {
+        if (!currentAudio) return resolve(true);
+        
+        currentAudio.onended = () => resolve(true);
+        currentAudio.onerror = () => resolve(true); // 出错也放行，绝不卡死队列
+        
+        currentAudio.play().catch(err => {
+          console.warn('浏览器静音拦截或播放失败:', err);
+          resolve(true);
+        });
       });
-    });
+    } else {
+      // 🌟 Slave 模式：不播放声音，但要模拟播放时间，或者直接跳过
+      // 为了保持字幕同步，我们最好还是模拟一下时间，或者直接 resolve
+      // 简单起见，Slave 模式下直接跳过音频播放，字幕会瞬间显示
+      // 如果想要字幕同步，需要根据 audio duration 做延时，但这需要解码音频
+      // 这里先做简单处理：直接跳过
+      console.log('🔇 [Slave Mode] 跳过音频播放，仅显示字幕');
+    }
   } finally {
     currentAudio = null;
     isPlaying = false;
