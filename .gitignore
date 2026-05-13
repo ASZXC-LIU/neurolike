@@ -179,3 +179,28 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# Editors / IDE
+.trae/
+.vs/
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# Frontend
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Native / compiled outputs
+bin/
+obj/
+vcpkg/
+vcpkg_installed/
+
+# Large local dependency or model trees
+NeuralLink_Server/GPT-SoVITS/
+NeuralLink_Server/vcpkg/
+NeuralLink_Server/NeuralLink_Native/
+NeuralLink_Native/build/
